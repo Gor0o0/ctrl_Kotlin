@@ -1,25 +1,29 @@
 package lesson2
 
-import de.fabmax.kool.KoolApplication   // Запускает Kool-приложение
-import de.fabmax.kool.addScene          // функция - добавить сцену (UI, игровой мир и тд)
-
-import de.fabmax.kool.math.Vec3f        // 3D - вектор (x,y,z)
-import de.fabmax.kool.math.deg          // deg - превращение числа в градусы
-import de.fabmax.kool.scene.*           // Сцена, камера, источники света и тд
-
-import de.fabmax.kool.modules.ksl.KslPbrShader  // готовый PBR Shader - материал
-import de.fabmax.kool.util.Color        // Цветовая палитра
-import de.fabmax.kool.util.Time         // Время deltaT - сколько прошло секунд между двумя кадрами
-
-import de.fabmax.kool.pipeline.ClearColorLoad // Режим говорящий не очищать экран от элементов (нужен для UI)
-
-import de.fabmax.kool.modules.ui2.*     // импорт всех компонентов интерфейса, вроде text, button, Row....
+import de.fabmax.kool.KoolApplication
+import de.fabmax.kool.addScene
+import de.fabmax.kool.math.Vec3f
+import de.fabmax.kool.math.deg
+import de.fabmax.kool.scene.*
+import de.fabmax.kool.modules.ksl.KslPbrShader
+import de.fabmax.kool.util.Color
+import de.fabmax.kool.util.Time
+import de.fabmax.kool.pipeline.ClearColorLoad
+import de.fabmax.kool.modules.ui2.*
 
 enum class ItemType{
     WEAPON,
     ARMOR,
     POTION
 }
+
+//////////<0>
+enum class WeaponDamage(val bonus: Int) {
+    NONE(0),
+    SWORD(10),
+    LEGENDARY_SWORD(20)
+}
+//////////</0>
 
 data class Item(
     val id: String,
@@ -40,9 +44,13 @@ class GameState(){
     val potionTicksLeft = mutableStateOf(0)
     val hotbar = mutableStateOf(
         List<ItemStack?>(9) {null}
-        // Создание списка предметов (максимум 9) по умолчанию ячейки пустые
     )
     val selectedSlot = mutableStateOf(0)
+
+    //////////<0>
+    val baseDamage = mutableStateOf(20)
+    val currentDamage = mutableStateOf(20)
+    //////////</0>
 }
 
 val HEALING_POTION = Item(
@@ -58,6 +66,15 @@ val SWORD = Item(
     ItemType.WEAPON,
     1
 )
+
+//////////<0>
+val LEGENDARY_SWORD = Item(
+    "legend_sword",
+    "Legendary Sword",
+    ItemType.WEAPON,
+    1
+)
+//////////</0>
 
 fun putIntoSlot(
     slots: List<ItemStack?>,
@@ -80,7 +97,7 @@ fun putIntoSlot(
         newSlots[slotIndex] = ItemStack(item, current.count + toAdd)
         return newSlots
     }
-    // Если в слоте другой передмет или максимальный стак заполнен - ничего не кладем
+
     return newSlots
 }
 
@@ -88,7 +105,6 @@ fun useSelected(
     slots: List<ItemStack?>,
     slotIndex: Int
 ): Pair<List<ItemStack?>, ItemStack?> {
-    // Pair - возвращает пару значений (1 новые слоты 2 то что использовали)
 
     val newSlots = slots.toMutableList()
     val current = newSlots[slotIndex] ?: return Pair(newSlots, null)
@@ -96,7 +112,6 @@ fun useSelected(
     val newCount = current.count - 1
 
     if (newCount <= 0) {
-        // Если предметы кончились в слоте после использования - очистить ячейку
         newSlots[slotIndex] = null
     } else {
         newSlots[slotIndex] = ItemStack(current.item, newCount)
@@ -104,10 +119,25 @@ fun useSelected(
     return Pair(newSlots, current)
 }
 
+//////////<0>
+// Функция вычисления урона в зависимости от выбранного слота
+fun updateDamage(game: GameState) {
+    val slot = game.selectedSlot.value
+    val stack = game.hotbar.value[slot]
+
+    val bonus = when (stack?.item?.id) {
+        "sword" -> WeaponDamage.SWORD.bonus
+        "legend_sword" -> WeaponDamage.LEGENDARY_SWORD.bonus
+        else -> WeaponDamage.NONE.bonus
+    }
+
+    game.currentDamage.value = game.baseDamage.value + bonus
+}
+//////////</0>
+
 fun main() = KoolApplication{
     val game = GameState()
 
-    // Сцена мировая 3D
     addScene {
         defaultOrbitCamera()
 
@@ -143,10 +173,13 @@ fun main() = KoolApplication{
             }else{
                 potionTimeSec = 0f
             }
+
+            //////////<0>
+            updateDamage(game)
+            //////////</0>
         }
     }
 
-    // Сцена худа
     addScene {
         setupUiScene(ClearColorLoad)
 
@@ -161,14 +194,18 @@ fun main() = KoolApplication{
                 Text("Игрок: ${game.playerId.use()}"){}
                 Text("HP: ${game.hp.use()}"){}
                 Text("Отравление: ${game.potionTicksLeft.use()}"){}
+
+                //////////<0>
+                Text("Урон: ${game.currentDamage.use()}"){}
+                //////////</0>
             }
+
             Row {
                 modifier.margin(top = 6.dp)
                 val slots = game.hotbar.use()
                 val select = game.selectedSlot.use()
 
                 for (i in 0 until 9){
-                    // Рисуем каждую ячейку инвентаря
                     val isSelected = (i == select)
                     Box {
                         modifier
@@ -180,9 +217,9 @@ fun main() = KoolApplication{
                                     8.dp
                                 )
                             )
-
                             .onClick{
                                 game.selectedSlot.value = i
+                                updateDamage(game)
                             }
 
                         val stack = slots[i]
@@ -191,11 +228,9 @@ fun main() = KoolApplication{
                         }else{
                             Column {
                                 modifier.padding(6.dp)
-
                                 Text("${stack.item.name}"){
                                     modifier.font(sizes.smallText)
                                 }
-
                                 Text("x${stack.count}"){
                                     modifier.font(sizes.smallText)
                                 }
@@ -228,13 +263,24 @@ fun main() = KoolApplication{
                         }
                 }
 
+                //////////<0>
+                Button("Получить легендарный меч"){
+                    modifier
+                        .margin(end = 8.dp)
+                        .onClick{
+                            val idx = game.selectedSlot.value
+                            val updated = putIntoSlot(game.hotbar.value, idx, LEGENDARY_SWORD, 1)
+                            game.hotbar.value = updated
+                        }
+                }
+                //////////</0>
+
                 Button("Использовать выбранное"){
                     modifier.onClick{
                         val idx = game.selectedSlot.value
                         val (updatedSlots, used) = useSelected(game.hotbar.value, idx)
                         game.hotbar.value = updatedSlots
 
-                        // Если использовали зелье - наложить лечение
                         if(used != null && used.item.type == ItemType.POTION){
                             game.hp.value = (game.hp.value + 20).coerceAtMost(100)
                         }
@@ -254,26 +300,3 @@ fun main() = KoolApplication{
         }
     }
 }
-// Сделать так, чтобы при выборе меча в активном столе инвентаря - появлялся модификатор урона
-// То есть создать свойство базового урона
-// Создать логику проверки меча в активном слоте
-// Создать 2 вид меча который будет делать больший модификатор
-// Вывести активное состояние урона игрока на UI
-// Итоговый пример:
-// - базовый урон = 20
-// - если выбран обычный меч, отобразить на панели HUD 20 + 10
-// - если выбран легендарный меч отобразитьб 20 + 20
-
-
-
-
-
-
-
-
-
-
-
-
-
-
