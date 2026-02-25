@@ -454,9 +454,37 @@ class QuestManager(
 //            else -> {}
 //        }
 //    }
-    private fun handleEvent(event: Event) {
 
+    private fun handleEvent(event: GameEvent) {
+        val player = event.playerId
+
+        for (quest in quests) {
+            val questId = quest.questId
+            val currentState = getStateName(player, questId)
+            val nextState = quest.nextStateName(currentState, event, game)
+
+            // continue это похоже на штуку которую мы изучали типо если не выполнилось - пропустить и идти дальше без ошибок
+            if (nextState == currentState) continue
+
+            setStateName(player, questId, nextState)
+
+            bus.publish(
+                QuestStateChanged(
+                    playerId = player,
+                    questId = questId,
+                    newStateName = nextState
+                )
+            )
+
+            bus.publish(
+                PlayerProgressSaved(
+                    playerId = player,
+                    reason = "updated"
+                )
+            )
+        }
     }
+
     // private fun handleEvent(принимает событие)
     // получить playerId
     // сделать for для перебора всех квестов внутри quests
