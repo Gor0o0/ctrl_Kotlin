@@ -187,6 +187,11 @@ data class CmdSavePlayer(
     val gold: Int
 ) : GameCommand
 
+data class CmdResetQuest(
+    override val playerId: String
+) : GameCommand
+
+
 // SERVER WORLD - серверные данные и обработка команд
 
 //PlayerData
@@ -300,7 +305,14 @@ class ServerWorld(
             }
             is CmdSavePlayer -> {
                 savePlayerToDisk(cmd.playerId)
-                bus.publish(PlayerProgressSaved(cmd.playerId, "Сохранено")) }
+                bus.publish(PlayerProgressSaved(cmd.playerId, "Сохранено"))
+            }
+            is CmdResetQuest -> {
+                player.questState = QuestState.START
+                bus.publish(QuestStateChanged(cmd.playerId, questId, QuestState.START)
+                bus.publish(PlayerProgressSaved(cmd.playerId, "квест сброшен"))
+            }
+
         }
     }
 
@@ -571,6 +583,13 @@ fun main() = KoolApplication {
                             .padding(end = 12.dp)
                             .onClick {
                                 client.send(CmdSavePlayer(ui.playerId.value, ui.hp.value, ui.gold.value))
+                            }
+                    }
+                    Button("Сброс") {
+                        modifier
+                            .padding(end = 12.dp)
+                            .onClick {
+                                client.send(CmdResetQuest(ui.playerId.value))
                             }
                     }
                 }
