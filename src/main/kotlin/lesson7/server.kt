@@ -14,7 +14,6 @@ import de.fabmax.kool.util.Time         // Время deltaT - сколько п
 import de.fabmax.kool.pipeline.ClearColorLoad // Режим говорящий не очищать экран от элементов (нужен для UI)
 
 import de.fabmax.kool.modules.ui2.*     // импорт всех компонентов интерфейса, вроде text, button, Row....
-import f.pushLog
 import jdk.jfr.Event
 
 import java.io.File
@@ -142,7 +141,7 @@ data class PlayerProgressSaved(
     val reason: String
 ): GameEvent
 
-typealias Listener = (GameState) -> Unit
+typealias Listener = (GameEvent) -> Unit
 
 class EventBus{
     private val listeners = mutableListOf<Listener>()
@@ -163,30 +162,30 @@ class EventBus{
 
 // Команды - "запрос клиента на сервер"
 
-sealed class GameCommand{
+sealed interface GameCommand{
     val playerId: String
 }
 
 data class CmdTalkToNpc(
     override val playerId: String,
     val npcId: String,
-): GameCommand()
+): GameCommand
 
 data class CmdSelectChoice(
     override val playerId: String,
     val npcId: String,
     val choiceId: String
-): GameCommand()
+): GameCommand
 
 data class CmdLoadPlayer(
     override val playerId: String,
-): GameCommand()
+): GameCommand
 
 data class CmdSavePlayer(
     override val playerId: String,
     val hp: Int,
     val gold: Int
-) : GameCommand()
+) : GameCommand
 
 // SERVER WORLD - серверные данные и обработка команд
 
@@ -280,17 +279,17 @@ class ServerWorld(
         when (cmd){
             is CmdTalkToNpc -> {
                 // публикация события от сервера всей игре - это подтверждение сервера что игрок поговорил
-                bus.publish(TalkedToNpc(cmd.npcId, cmd.npcId))
+                bus.publish(TalkedToNpc(cmd.playerId, cmd.npcId))
 
                 // после рассылки сервер меняет соответсвтвено правилам которые прописанным в dialogueFor
                 val newState = nextQuestState(player.questState, TalkedToNpc(cmd.playerId, cmd.npcId), cmd.npcId)
                 setQuestState(cmd.playerId, player, newState)
             }
             is CmdSelectChoice -> {
-                bus.publish(CmdSelectChoice(cmd.playerId, cmd.npcId, cmd.choiceId))
+                bus.publish(ChoiceSelected(cmd.playerId, cmd.npcId, cmd.choiceId))
 
                 // после рассылки сервер меняет соответсвтвено правилам которые прописанным в dialogueFor
-                val newState = nextQuestState(player.questState, CmdSelectChoice(cmd.playerId, cmd.npcId, cmd.choiceId), cmd.npcId)
+                val newState = nextQuestState(player.questState, ChoiceSelected(cmd.playerId, cmd.npcId, cmd.choiceId), cmd.npcId)
                 setQuestState(cmd.playerId, player, newState)
             }
 
@@ -300,13 +299,13 @@ class ServerWorld(
                 bus.publish(PlayerProgressSaved(cmd.playerId, "Игрок загрузил сохранения с диска"))
             }
             is CmdSavePlayer -> {
-                savePlayerToDisk(cmd.playerId, cmd.hp, cmd.gold)
+                savePlayerToDisk(cmd.playerId)
                 bus.publish(PlayerProgressSaved(cmd.playerId, "Сохранено")) }
         }
     }
 
     // правила квеста (state machine)
-    private fun nexdtQuestState(current: QuestState, event: GameEvent, npcId: String): QuestState {
+    private fun nextQuestState(current: QuestState, event: GameEvent, npcId: String): QuestState {
         // npcId -нужен чтобы не реагировать на других нпс не связанных с этапом квеста
 
         if (npcId != "alchemist") return current
@@ -509,10 +508,12 @@ fun main() = KoolApplication {
                 // Выводите информациб о статах что за игрок, какой хп, сколько золота
                 // важно не просто получать значение value а читать изменения состояний
 
-                Text("Игрок: ${ui.playerId}"){}
-                Text("HP: ${ui.hp}"){}
-                Text("Gold: ${ui.gold}"){}
-                Text("QuestState: ${ui.questState}"){}
+                Text("Игрок: ${ui.playerId.use()}"){}
+                Text("HP: ${ui.hp.use()}"){}
+                Text("Gold: ${ui.gold.use()}"){}
+                Text("QuestState: ${ui.questState.use()}"){}
+
+                val qState = ui.questState.use()
 
                 // Отображаете нынешний пинг
                 Text("Ping: ${ui.networkLagMs}"){}
@@ -572,6 +573,40 @@ fun main() = KoolApplication {
                                 client.send(CmdSavePlayer(ui.playerId.value, ui.hp.value, ui.gold.value))
                             }
                     }
+                }
+                val dialog = npc.dialogueFor(qState)
+
+                Text("${dialog.npcName}"){
+                    modifier.margin(top = sizes.gap)
+                }
+                Text(dialog.text){
+                    modifier.margin(top = sizes.smallGap)
+                }
+
+                Row {
+                    // Перебор всех вариантов ответа
+                    for(opt in dialog.options){
+                        Button (opt.text) {
+                            modifier.margin(end = 8.dp)
+                                .onClick{
+                                    val pid = ui.playerId.value
+
+                                    // Клиент отправляет не события а команды серверу что он нажал
+                                    when(opt.id){
+                                        "talk" -> client.send(CmdTalkToNpc(pid, "alchemist"))
+                                        "help" -> client.send(CmdSelectChoice(pid, "alchemist", "help"))
+                                        "threat" -> client.send(CmdSelectChoice(pid, "alchemist", "threat"))
+                                        "threat_confirm" -> client.send(CmdSelectChoice(pid, "alchemist", "threat_confirm"))
+
+                                    }
+                                }
+                        }
+                    }
+                }
+                // Логирование
+                Text("[LOG]"){ modifier.margin(top = sizes.gap)}
+                for (line in ui.log.use()){
+                    Text(line) {modifier.font(sizes.smallText)}
                 }
             }
         }
