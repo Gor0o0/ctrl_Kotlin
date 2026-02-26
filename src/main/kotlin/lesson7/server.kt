@@ -52,7 +52,7 @@ data class DialogueView(
 )
 
 class Npc(
-    val id: String,
+    val npcId: String,
     val name: String
 ){
     fun dialogueFor(state: QuestState): DialogueView{
@@ -182,6 +182,12 @@ data class CmdLoadPlayer(
     override val playerId: String,
 ): GameCommand()
 
+data class CmdSavePlayer(
+    override val playerId: String,
+    val hp: Int,
+    val gold: Int
+) : GameCommand()
+
 // SERVER WORLD - серверные данные и обработка команд
 
 //PlayerData
@@ -293,6 +299,9 @@ class ServerWorld(
                 // после загрузки сохранения игрока - желательно тоже сохранить событем
                 bus.publish(PlayerProgressSaved(cmd.playerId, "Игрок загрузил сохранения с диска"))
             }
+            is CmdSavePlayer -> {
+                savePlayerToDisk(cmd.playerId, cmd.hp, cmd.gold)
+                bus.publish(PlayerProgressSaved(cmd.playerId, "Сохранено")) }
         }
     }
 
@@ -454,7 +463,7 @@ fun main() = KoolApplication {
             is QuestStateChanged -> "[EVENT] Квест ${event.questId} перешёл на этап ${event.newState}"
             is PlayerProgressSaved -> "[EVENT] Сохранено для ${event.playerId} причина - ${event.reason}"
         }
-        pushLog(ui, "[${event.playerId}] $line")
+        pushLog(ui, "[${ui.playerId}] $line")
     }
 
     addScene {
@@ -492,10 +501,78 @@ fun main() = KoolApplication {
             // отступить снаружи 16 dp
             // сделать фон 0f 0f 0f 0.6 и скруглить вместе с фоном углы на 14.dp
             modifier
+                .align(AlignmentX.Start, AlignmentY.Top)
+                .background(RoundRectBackground(Color(0f,0f,0f,0.6f), 14.dp))
+                .margin(16.dp)
 
             Column{
                 // Выводите информациб о статах что за игрок, какой хп, сколько золота
                 // важно не просто получать значение value а читать изменения состояний
+
+                Text("Игрок: ${ui.playerId}"){}
+                Text("HP: ${ui.hp}"){}
+                Text("Gold: ${ui.gold}"){}
+                Text("QuestState: ${ui.questState}"){}
+
+                // Отображаете нынешний пинг
+                Text("Ping: ${ui.networkLagMs}"){}
+
+                Row{
+                    // Создаете 3 кнопки с помощью которых вы можете менять пинг
+                    // 50ms 350ms 1200ms
+                    // так же важно сделать между кнопками отступ чтобы они сливались
+                    Button("ping: 50ms") {
+                        modifier
+                            .padding(end = 10.dp)
+                            .onClick{
+                                ui.networkLagMs.value = 50
+                            }
+                    }
+                    Button("ping: 350ms") {
+                        modifier
+                            .padding(end = 10.dp)
+                            .onClick{
+                                ui.networkLagMs.value = 350
+                            }
+                    }
+                    Button("ping: 1200ms") {
+                        modifier
+                            .padding(end = 10.dp)
+                            .onClick{
+                                ui.networkLagMs.value = 1200
+                            }
+                    }
+                }
+                Row{
+                    // Отступ
+                    // Сделать кнопку переключения игроков
+                    Button("смена игрока") {
+                        modifier
+                            .padding(end = 12.dp)
+                            .onClick{
+                                ui.playerId.value = if (ui.playerId.value == "Oleg") "TrippiTroppa" else "Oleg"
+                            }
+                    }
+                    // Отступ
+                    modifier.margin(12.dp)
+                    // Кнопка загрузки сохранения игрока
+                    // ВАЖНО клиент не должен загружать файл напрямую
+                    // Клиент должен просить у сервера загрузить игрока
+                    Button("загрузить сохранение") {
+                        modifier
+                            .padding(end = 12.dp)
+                            .onClick {
+                                client.send(CmdLoadPlayer(ui.playerId.value))
+                            }
+                    }
+                    Button("Сохранить") {
+                        modifier
+                            .padding(end = 12.dp)
+                            .onClick {
+                                client.send(CmdSavePlayer(ui.playerId.value, ui.hp.value, ui.gold.value))
+                            }
+                    }
+                }
             }
         }
     }
