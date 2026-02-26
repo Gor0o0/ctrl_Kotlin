@@ -14,9 +14,8 @@ import de.fabmax.kool.util.Time         // Время deltaT - сколько п
 import de.fabmax.kool.pipeline.ClearColorLoad // Режим говорящий не очищать экран от элементов (нужен для UI)
 
 import de.fabmax.kool.modules.ui2.*     // импорт всех компонентов интерфейса, вроде text, button, Row....
+import f.pushLog
 import jdk.jfr.Event
-import lesson5.Listener
-import lesson6.GameState
 
 import java.io.File
 import java.security.Guard
@@ -135,7 +134,7 @@ data class ChoiceSelected(
 data class QuestStateChanged(
     override val playerId: String,
     val questId: String,
-    val newState: String
+    val newState: QuestState
 ): GameEvent
 
 data class PlayerProgressSaved(
@@ -197,3 +196,307 @@ data class PendingCommand(
     val cmd: GameCommand,
     var delayLeftSec: Float
 )
+
+class ServerWorld(
+    private val bus: EventBus
+){
+    private val questId = "q_alchemist"
+
+    // Словарь всех игроков сервера
+    private val serverPlayers = mutableMapOf<String, PlayerData>()
+
+    // inbox - очередь выполнения команд с учётом пинга
+    private val inbox = mutableListOf<PendingCommand>()
+
+    // Метод проверки существования игрока в базе данных и еслии его нет - создаем
+    private fun ensurePlayer(playerId: String): PlayerData {
+        val existing = serverPlayers[playerId]
+        if (existing != null) return existing
+        // если пользователь существует в базе данных то вернуть его, если нет - идём дальше и создаём его
+
+        val created = PlayerData(
+            100,
+            0,
+            QuestState.START
+        )
+        serverPlayers[playerId] = created
+        return created
+    }
+    // Снимок серверных данных
+    fun getSnapshot(playerId: String): PlayerData{
+        val player = ensurePlayer(playerId)
+
+        // Копия важна - так как мы в клиенте не можем менять информацмю об игроке
+        // мы отправляем (return) новый объект PlayerData чтобы клиент не мог изменить но мог прочесть и отобразить
+        return PlayerData(
+            player.hp,
+            player.gold,
+            player.questState
+        )
+    }
+
+    // Метод для отправки комманды на сервер от коиента
+    fun sendCommand(cmd: GameCommand, networkLagMs: Int){
+        val lagSec = networkLagMs / 1000f
+        // перевод милисекунд в секунды
+
+        // добавляем в очередь выполнения команд
+        inbox.add(
+            PendingCommand(
+                cmd,
+                lagSec
+            )
+        )
+    }
+
+    // метод update вызывается каждый кадр, нужен для уменьшения задержки и выполнения команд которые дошлт
+    fun update(deltaSec: Float){
+        // delta - сколько прошло времени с прошлого кадра(Time.deltaT)
+        // уменьшаем таймер у каждой команды за прошедшее delta время
+        for (pending in inbox){
+            pending.delayLeftSec -= deltaSec
+        }
+
+        // отфильтруем очередь с отдельным списком с командами готовыми к выполнению
+        val ready = inbox.filter{ it.delayLeftSec <= 0f}
+
+        //удаляем команды которые надо выполнить из списка очереди
+        inbox.removeAll(ready)
+
+        for (pending in ready){
+            applyCommand(pending.cmd)
+        }
+    }
+
+    private fun applyCommand(cmd: GameCommand){
+        val player = ensurePlayer(cmd.playerId)
+
+        when (cmd){
+            is CmdTalkToNpc -> {
+                // публикация события от сервера всей игре - это подтверждение сервера что игрок поговорил
+                bus.publish(TalkedToNpc(cmd.npcId, cmd.npcId))
+
+                // после рассылки сервер меняет соответсвтвено правилам которые прописанным в dialogueFor
+                val newState = nextQuestState(player.questState, TalkedToNpc(cmd.playerId, cmd.npcId), cmd.npcId)
+                setQuestState(cmd.playerId, player, newState)
+            }
+            is CmdSelectChoice -> {
+                bus.publish(CmdSelectChoice(cmd.playerId, cmd.npcId, cmd.choiceId))
+
+                // после рассылки сервер меняет соответсвтвено правилам которые прописанным в dialogueFor
+                val newState = nextQuestState(player.questState, CmdSelectChoice(cmd.playerId, cmd.npcId, cmd.choiceId), cmd.npcId)
+                setQuestState(cmd.playerId, player, newState)
+            }
+
+            is CmdLoadPlayer -> {
+                loadPlayerFromDisk(cmd.playerId, player)
+                // после загрузки сохранения игрока - желательно тоже сохранить событем
+                bus.publish(PlayerProgressSaved(cmd.playerId, "Игрок загрузил сохранения с диска"))
+            }
+        }
+    }
+
+    // правила квеста (state machine)
+    private fun nexdtQuestState(current: QuestState, event: GameEvent, npcId: String): QuestState {
+        // npcId -нужен чтобы не реагировать на других нпс не связанных с этапом квеста
+
+        if (npcId != "alchemist") return current
+
+        return when (current) {
+            QuestState.START -> when (event) {
+                is TalkedToNpc -> QuestState.OFFERED
+                else -> QuestState.START
+                //если состояние квеста START и проходит событие TalkedToNpc тогда поменять состояние квеста на OFFERED
+            }
+            QuestState.OFFERED -> when(event){
+                is ChoiceSelected -> {
+                    if(event.choiceId == "help") QuestState.HELP_ACCEPTED else QuestState.THREAT_ACCEPTED
+                }
+                else -> QuestState.OFFERED
+            }
+
+            QuestState.THREAT_ACCEPTED -> when(event){
+                is ChoiceSelected -> {
+                    if (event.choiceId == "threat_confirm") QuestState.EVIL_END else QuestState.THREAT_ACCEPTED
+                }
+                else -> QuestState.THREAT_ACCEPTED
+            }
+
+            QuestState.HELP_ACCEPTED -> QuestState.GOOD_END
+            QuestState.GOOD_END -> QuestState.GOOD_END
+            QuestState.EVIL_END -> QuestState.EVIL_END
+        }
+    }
+    private fun setQuestState(playerId: String, player: PlayerData, newState: QuestState) {
+        val old = player.questState
+        if (newState != old) return
+
+        player.questState = newState
+
+        bus.publish(
+            QuestStateChanged(
+                playerId,
+                questId,
+                newState
+            )
+        )
+
+        bus.publish(
+            PlayerProgressSaved(
+                playerId,
+                "Игрок перешёл на новый этап квеста ${newState.name}"
+            )
+        )
+    }
+    // Сохранение и загрузка на сервер
+    private fun saveFile(playerId: String): File{
+        val dir = File("saves")
+        if(!dir.exists()) dir.mkdirs()
+        return File(dir, "${playerId}_server.save")
+    }
+
+    fun savePlayerToDisk(playerId: String){
+        val player = ensurePlayer(playerId)
+        val file = saveFile(playerId)
+
+        val sb = StringBuilder()
+        // Пустой сборщик строк
+
+        sb.append("playerId=").append(playerId).append("\n")
+        // append - добавление текста в конец списка
+        sb.append("hp=").append(player.hp).append("\n")
+        sb.append("gold=").append(player.gold).append("\n")
+        sb.append("questState=").append(player.questState.name).append("\n")
+        // name - превратит enum в строку например "START"
+
+        val text = sb.toString()
+        // toString - получить финальную строку из StringBuilder
+
+        file.writeText(text)
+    }
+
+    private fun loadPlayerFromDisk(playerId: String, player: PlayerData){
+        val file = saveFile(playerId)
+        if (!file.exists()) return
+
+        val map = mutableMapOf<String, String>()
+        // словарь который будет в себе брать 2 части строки с учётом разделителя
+        // hp=100 - ключ занесем в hp в значение 100
+
+        for (line in file.readLines()){
+            val parts = line.split("=")
+            //поделить цельную строку на 2 части с учётом разделителя =
+            if (parts.size == 2){
+                map[parts[0]] = parts[1]
+            }
+        }
+        player.hp = map["hp"]?.toIntOrNull() ?: 100
+        player.gold = map["gold"]?.toIntOrNull() ?: 0
+
+        val stateName = map["questState"] ?: QuestState.START.name
+
+        player.questState = try{
+            QuestState.valueOf(stateName)
+        } catch (e: Exception){
+            QuestState.START
+        }
+    }
+}
+
+// SaveSystem - отдельная система которая слушает события и вызывает save на сервере
+class SaveSystem(
+    private val bus: EventBus,
+    private val server: ServerWorld
+){
+    init {
+        bus.subscribe { event ->
+            if (event is PlayerProgressSaved) {
+                server.savePlayerToDisk(event.playerId)
+            }
+        }
+    }
+}
+
+class Client(
+    private val ui: ClientUiState,
+    private val server: ServerWorld
+){
+    fun send(cmd: GameCommand){
+        // ui -> Server отправка команды с текущим пингом
+        server.sendCommand(cmd, ui.networkLagMs.value)
+    }
+
+    fun syncFromServer(){
+        // берём снимок данных с сервера
+        val snap = server.getSnapshot(ui.playerId.value)
+
+        // После получения копии данных обновляем клиентский UI state
+        ui.hp.value = snap.hp
+        ui.gold.value = snap.gold
+        ui.questState.value = snap.questState
+
+    }
+}
+
+fun main() = KoolApplication {
+    val ui = ClientUiState()
+    val bus = EventBus()
+    val server = ServerWorld(bus)
+    val saveSystem = SaveSystem(bus, server)
+    val client = Client(ui, server)
+
+    val npc = Npc("alchemist", "Алхимик")
+
+    bus.subscribe { event ->
+        val line = when(event){
+            is TalkedToNpc -> "[EVENT] Игрок ${event.playerId} поговорил с ${event.npcId}"
+            is ChoiceSelected -> "[EVENT] Игрок ${event.playerId} выбрад вариант ответа: ${event.choiceId}"
+            is QuestStateChanged -> "[EVENT] Квест ${event.questId} перешёл на этап ${event.newState}"
+            is PlayerProgressSaved -> "[EVENT] Сохранено для ${event.playerId} причина - ${event.reason}"
+        }
+        pushLog(ui, "[${event.playerId}] $line")
+    }
+
+    addScene {
+        defaultOrbitCamera()
+        addColorMesh {
+            generate { cube{colored()} }
+
+            shader = KslPbrShader {
+                color { vertexColor()}
+                metallic(0.7f)
+                roughness(0.4f)
+            }
+
+            onUpdate{
+                transform.rotate(45f.deg * Time.deltaT, Vec3f.X_AXIS)
+            }
+
+            lighting.singleDirectionalLight {
+                setup(Vec3f(-1f, -1f, -1f))
+                setColor(Color.WHITE, 5f)
+            }
+
+            onUpdate{ // главный цикл сервера
+                server.update(Time.deltaT) // сервер обрабатывает очередь команд
+                client.syncFromServer() // клиент обновляет HUB из серверных данныхн
+            }
+        }
+    }
+    addScene {
+        setupUiScene(ClearColorLoad)
+
+        addPanelSurface {
+            //modifier
+            // выровнять по верхнему углу
+            // отступить снаружи 16 dp
+            // сделать фон 0f 0f 0f 0.6 и скруглить вместе с фоном углы на 14.dp
+            modifier
+
+            Column{
+                // Выводите информациб о статах что за игрок, какой хп, сколько золота
+                // важно не просто получать значение value а читать изменения состояний
+            }
+        }
+    }
+}
