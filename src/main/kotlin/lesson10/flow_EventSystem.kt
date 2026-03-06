@@ -2,7 +2,6 @@ package lesson10
 
 import de.fabmax.kool.KoolApplication           // KoolApplication - запускает Kool-приложение (окно + цикл рендера)
 import de.fabmax.kool.addScene                  // addScene - функция "добавь сцену" в приложение (у тебя она просила отдельный импорт)
-import de.fabmax.kool.math.FLT_EPSILON
 import de.fabmax.kool.math.Vec3f                // Vec3f - 3D-вектор (x, y, z), как координаты / направление
 import de.fabmax.kool.math.deg                  // deg - превращает число в "градусы" (угол)
 import de.fabmax.kool.scene.*                   // scene.* - Scene, defaultOrbitCamera, addColorMesh, lighting и т.д.
@@ -11,27 +10,20 @@ import de.fabmax.kool.util.Color                // Color - цвет (RGBA)
 import de.fabmax.kool.util.Time                 // Time.deltaT - сколько секунд прошло между кадрами
 import de.fabmax.kool.pipeline.ClearColorLoad   // ClearColorLoad - режим: "не очищай экран, оставь то что уже нарисовано"
 import de.fabmax.kool.modules.ui2.*             // UI2: addPanelSurface, Column, Row, Button, Text, dp, remember, mutableStateOf
-import de.fabmax.kool.util.DynamicStruct
 import de.fabmax.kool.modules.ui2.UiModifier.*
-import de.fabmax.kool.physics.geometry.PlaneGeometry
-import de.fabmax.kool.physics.vehicle.Vehicle
-import de.fabmax.kool.util.checkIsReleased
 
 import kotlinx.coroutines.launch  // запускает корутину
 import kotlinx.coroutines.Job     // контроллер запущенной корутины
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive // проверка жива ли ещё корутина - полезно для циклов
 import kotlinx.coroutines.delay
 
 // Flow корутины
-import kotlinx.coroutines.launch // запуск корутины
 import kotlinx.coroutines.flow.MutableSharedFlow // табло состояний
 import kotlinx.coroutines.flow.SharedFlow // Только чтение для подписчиков
 import kotlinx.coroutines.flow.MutableStateFlow // Радиостанция событий
 import kotlinx.coroutines.flow.StateFlow // Только для чтения стостояний
 import kotlinx.coroutines.flow.asSharedFlow // Отдать наружу только SharedFlow
 import kotlinx.coroutines.flow.asStateFlow // Отдать только StateFlow
-import kotlinx.coroutines.flow.collect // слушать поток
 
 // импорты Serialization
 import kotlinx.serialization.Serializable // Анотация, что можно сохранять
@@ -47,7 +39,8 @@ data class PlayerSave(
     val gold: Int,
     val poisonTicksLeft: Int,
     val attackCooldownMsLeft: Long,
-    val questState: String
+    val questState: String,
+    val attackSpeedBuffTicksLeft: Int = 0
 )
 
 //События игровые - Flow будет рассылать их всем системам
@@ -92,6 +85,16 @@ data class SaveRequested(
     override val playerId: String,
 ): GameEvent
 
+data class CommandRejected(
+    override val playerId: String,
+    val reason: String
+) : GameEvent
+
+data class AttackSpeedBuffApplied(
+    override val playerId: String,
+    val ticks: Int
+) : GameEvent
+
 class GameServer {
     private val _events = MutableSharedFlow<GameEvent>(extraBufferCapacity = 64)
     // Дополнительный небольшой буфер, что Emit при рассылке событий чаще проходил не упираясь в ограничение буфера
@@ -134,43 +137,69 @@ class GameServer {
     }
 
 }
-class  DamageSystem(
-    private val server: GameServer
-){
-    fun onEvent(e: GameEvent){
-        if(e is DamageDealt){
-            server.updatePlayer(e.playerId){player -> val newHp = (player.hp - e.amount).coerceAtLeast(0)
-                player.copy(hp = newHp)
-            }
+class DamageSystem(
+    private val server: GameServer,
+    private val cds: CooldownSystem
+) {
+    fun onEvent(event: GameEvent) {
+        if (event !is AttackPressed) return
+
+        val playerId = event.playerId
+        val targetId = event.targetId
+
+        if (!cds.canAttack(playerId)) {
+            println("'эррор: кд ${server.getPlayer(playerId).attackCooldownMsLeft} мс")
+            return
         }
+
+        val damageAmount = 67
+
+        server.tryPublish(DamageDealt(playerId, targetId, damageAmount))
+
+        cds.startCooldown(playerId)
     }
 }
-class  CooldownSystem(
-    private val server: GameServer,
+class CooldownSystem(
+    val server: GameServer,
     private val scope: kotlinx.coroutines.CoroutineScope
-){
+) {
     private val cooldownJobs = mutableMapOf<String, Job>()
 
-    fun startCooldown(playerId: String, totalMs: Long){
+    fun startCooldown(playerId: String) {
         cooldownJobs[playerId]?.cancel()
 
-        server.updatePlayer(playerId) {player -> player.copy(attackCooldownMsLeft = totalMs)}
+        val player = server.getPlayer(playerId)
+
+        val cooldownMs = if (player.attackSpeedBuffTicksLeft > 0) 700L else 1200L
+
+        server.updatePlayer(playerId) {
+            it.copy(attackCooldownMsLeft = cooldownMs)
+        }
 
         val job = scope.launch {
+            var waiting = cooldownMs
             val step = 100L
 
-            while(isActive && server.getPlayer(playerId).attackCooldownMsLeft > 0L){
+            while (isActive && waiting > 0L) {
                 delay(step)
+                waiting -= step
+                server.updatePlayer(playerId) {
+                    it.copy(attackCooldownMsLeft = waiting)
+                }
+            }
 
-                server.updatePlayer(playerId) {player ->
-                    val left = (player.attackCooldownMsLeft - step).coerceAtLeast(0L)
-                    player.copy(attackCooldownMsLeft = left)
+            val updatedPlayer = server.getPlayer(playerId)
+            if (updatedPlayer.attackSpeedBuffTicksLeft > 0) {
+                server.updatePlayer(playerId) {
+                    it.copy(attackSpeedBuffTicksLeft = (it.attackSpeedBuffTicksLeft - 1).coerceAtLeast(0))
                 }
             }
         }
+
         cooldownJobs[playerId] = job
     }
-    fun  canAttack(playerId: String): Boolean{
+
+    fun canAttack(playerId: String): Boolean {
         return server.getPlayer(playerId).attackCooldownMsLeft <= 0L
     }
 }
@@ -218,16 +247,18 @@ class QuestSystem(
                     server.updatePlayer(e.playerId){it.copy(questState = "OFFERED")}
                     publish(QuestStateChanged(e.playerId, questId, "OFFERED"))
                 }
+
             }
             is ChoiceSelected -> {
                 if (e.npcId != npcId) return
 
-                if (player.questState == "OFFERED"){
-                    val newState = if(e.choiceId == "help") "GOOD_END"
-                    else "EVIL_END"
-
-                    server.updatePlayer(e.playerId){it.copy(questState = newState)}
+                if (player.questState == "OFFERED") {
+                    val newState = if (e.choiceId == "help") "GOOD_END" else "EVIL_END"
+                    server.updatePlayer(e.playerId){ it.copy(questState = newState) }
                     publish(QuestStateChanged(e.playerId, questId, newState))
+                }
+                else if (e.choiceId == "help") {
+                    publish(CommandRejected(e.playerId, "Рановато чел"))
                 }
             }
             else -> {}
@@ -329,7 +360,7 @@ fun main() = KoolApplication {
         Shared.quests = quests
 
         coroutineScope.launch {
-            server.events.collect{ event ->
+            server.events.collect { event ->
                 damage.onEvent(event)
             }
         }
@@ -420,10 +451,6 @@ fun main() = KoolApplication {
                 }
 
 // =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-                // получить server из Shared и если null - вернуть onClick
-                // получить playerId
-                // 1) пробовать отправить событие сохранения по playerId без корутины
-                // 2) если не удалось - отправить "нормально" через корутину this@addScene.coroutineScope.launch
                 Button("Save JSON") {
                     modifier.onClick {
                         val server = Shared.server ?: return@onClick
@@ -431,14 +458,47 @@ fun main() = KoolApplication {
                         val event = SaveRequested(playerId)
 
                         if (!server.tryPublish(event)) {
-                            this@addScene.coroutineScope.launch {
+                            coroutineScope.launch {
                                 server.publish(event)
                             }
                         }
                     }
                 }
+            }
+            Row {
+                Button("Атака") {
+                    modifier.onClick {
+                        val server = Shared.server ?: return@onClick
+                        val playerId = hud.activePlayerId.value
 
+                        val targetId = "Trippi Troppa"
+                        val event = AttackPressed(playerId, targetId)
+
+                        if (!server.tryPublish(event)) {
+                            coroutineScope.launch {
+                                server.publish(event)
+                            }
+                        }
+                    }
+                }
+                Button("Бускорить ×3") {
+                    modifier.onClick {
+                        val server = Shared.server ?: return@onClick
+                        val playerId = hud.activePlayerId.value
+
+                        val event = AttackSpeedBuffApplied(playerId, 3)
+
+                        server.tryPublish(event)
+                        coroutineScope.launch {
+                            server.publish(event)
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+// "Бафф скорости атаки"
+//      - добавить: AttackSpeedBuffApplied(playerId, ticks: Int)
+//      - пока бафф активен: кулдаун атаки 1200 ms -> 700ms
