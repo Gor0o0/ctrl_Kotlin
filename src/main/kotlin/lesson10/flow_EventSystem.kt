@@ -95,6 +95,11 @@ data class AttackSpeedBuffApplied(
     val ticks: Int
 ) : GameEvent
 
+data class PlayerProgressSaved(
+    override val playerId: String,
+    val reason: String
+) : GameEvent
+
 class GameServer {
     private val _events = MutableSharedFlow<GameEvent>(extraBufferCapacity = 64)
     // Дополнительный небольшой буфер, что Emit при рассылке событий чаще проходил не упираясь в ограничение буфера
@@ -134,6 +139,19 @@ class GameServer {
 
     fun getPlayer(playerId: String): PlayerSave {
         return _players.value[playerId] ?: PlayerSave(playerId, 100, 0, 0, 0L, "START")
+    }
+
+    fun applyLoaded(playerSave: PlayerSave) {
+        val oldMap = _players.value.toMutableMap()
+        oldMap[playerSave.playerId] = playerSave
+        _players.value = oldMap
+        
+        tryPublish(
+            PlayerProgressSaved(
+                playerId = playerSave.playerId,
+                reason = "Зload from JSON"
+            )
+        )
     }
 
 }
@@ -444,13 +462,23 @@ fun main() = KoolApplication {
             }
 
             Row{
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
                 Button("Switch Player") {
                     val current = hud.activePlayerId.value
                     hud.activePlayerId.value = if (current == "Oleg") "Stas" else "Oleg"
                 }
+                Button("Load JSON") {
+                    modifier.onClick {
+                        val playerId = hud.activePlayerId.value
+                        val server = Shared.server ?: return@onClick
+                        val saver = Shared.saver ?: return@onClick
+                        val loaded = saver.load(playerId)
+                        
+                        if (loaded != null) {
+                            server.applyLoaded(loaded)
+                        }
+                    }
+                }
 
-// =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
                 Button("Save JSON") {
                     modifier.onClick {
                         val server = Shared.server ?: return@onClick
